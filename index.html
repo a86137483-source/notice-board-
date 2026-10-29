@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>자유게시판</title>
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--tx:#1d1d1f;--sub:#6b7280;--line:#e5e7eb;--pri:#4f46e5;--red:#dc2626}
+@media(prefers-color-scheme:dark){:root{--bg:#111318;--card:#1b1e26;--tx:#eceef2;--sub:#9aa1ad;--line:#2b303b;--pri:#818cf8;--red:#f87171}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:-apple-system,"Noto Sans KR",sans-serif;line-height:1.5}
+header{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+h1{font-size:18px;margin:0}
+main{max-width:680px;margin:0 auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+input,textarea,select{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--tx);font:inherit;margin-bottom:8px}
+textarea{min-height:90px;resize:vertical}
+button{padding:8px 14px;border:0;border-radius:8px;background:var(--pri);color:#fff;font:inherit;cursor:pointer}
+button.ghost{background:transparent;color:var(--sub);padding:4px 8px;font-size:13px}
+button.danger{color:var(--red)}
+button:disabled{opacity:.5}
+.meta{font-size:12px;color:var(--sub)}
+.post h3{margin:4px 0 6px}
+.body{white-space:pre-wrap;word-break:break-word}
+.post img{max-width:100%;border-radius:8px;margin-top:8px}
+.cm{padding:6px 0;border-top:1px solid var(--line);font-size:14px}
+.row{display:flex;gap:6px;align-items:center}
+.row input{margin:0}
+a{color:var(--pri)}
+.notice{background:#fef3c7;color:#92400e;padding:10px;border-radius:8px;margin-bottom:12px;font-size:14px}
+</style>
+</head>
+<body>
+<header><h1><a href="./" style="color:inherit;text-decoration:none">자유게시판</a></h1><div id="auth"></div></header>
+<main>
+  <div id="banBox" class="notice" hidden>이용이 제한된 계정입니다. 글/댓글 작성이 불가능합니다.</div>
+  <section id="compose" class="card" hidden>
+    <input id="title" maxlength="100" placeholder="제목">
+    <textarea id="content" maxlength="3000" placeholder="내용을 입력하세요"></textarea>
+    <input id="file" type="file" accept="image/*">
+    <button id="submit">글 올리기</button>
+  </section>
+  <div id="feed"></div>
+</main>
+
+<script type="module">
+import { auth, db, provider } from "./firebase.js";
+import { signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { collection, addDoc, setDoc, doc, getDoc, deleteDoc, onSnapshot, query, orderBy, limit, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+// ===== 금지어 필터 (여기에 단어를 추가/삭제하세요) =====
+const BAD = ["시발","씨발","병신","개새끼","좆","fuck","shit"];
+const norm = s => s.toLowerCase().replace(/[^0-9a-z가-힣]/g, "");
+const hasBad = s => { const n = norm(s); return BAD.some(w => n.includes(norm(w))); };
+
+const esc = s => s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const linkify = s => esc(s).replace(/(https?:\/\/[^\s<]+)/g, u => `<a href="${u}" target="_blank" rel="noopener noreferrer nofollow">${u}</a>`);
+const $ = id => document.getElementById(id);
+
+let user = null, banned = false, posts = [], comments = [], lastAction = 0;
+const onePost = new URLSearchParams(location.search).get("post");
+
+onAuthStateChanged(auth, async u => {
+  user = u; banned = false;
+  if (u) { try { banned = (await getDoc(doc(db, "bans", u.uid))).exists(); } catch {} }
+  $("auth").innerHTML = u ? `<span class="meta">${esc(u.displayName || "익명")}</span> <button class="ghost" id="out">로그아웃</button>` : `<button id="in">구글 로그인</button>`;
+  if ($("in")) $("in").onclick = () => signInWithPopup(auth, provider);
+  if ($("out")) $("out").onclick = () => signOut(auth);
+  $("compose").hidden = !u || banned;
+  $("banBox").hidden = !banned;
+  render();
+});
+
+onSnapshot(query(collection(db, "posts"), orderBy("createdAt", "desc"), limit(50)), s => { posts = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); });
+onSnapshot(query(collection(db, "comments"), orderBy("createdAt", "asc"), limit(500)), s => { comments = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); });
+
+function cooldown() {
+  if (Date.now() - lastAction < 8000) { alert("잠시 후 다시 시도해주세요."); return false; }
+  lastAction = Date.now(); return true;
+}
+
+function resize(file) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => {
+      const r = Math.min(1, 800 / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = img.width * r; c.height = img.height * r;
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      res(c.toDataURL("image/jpeg", .7));
+    };
+    img.onerror = rej; img.src = URL.createObjectURL(file);
+  });
+}
+
+$("submit").onclick = async () => {
+  if (!user || banned) return;
+  const title = $("title").value.trim(), content = $("content").value.trim(), f = $("file").files[0];
+  if (!title || !content) return alert("제목과 내용을 입력하세요.");
+  if (hasBad(title + content)) return alert("부적절한 단어가 포함되어 있습니다.");
+  if (f && !f.type.startsWith("image/")) return alert("이미지 파일만 올릴 수 있습니다.");
+  if (f && f.size > 10 * 1024 * 1024) return alert("사진은 10MB 이하만 가능합니다.");
+  if (!cooldown()) return;
+  $("submit").disabled = true;
+  try {
+    const image = f ? await resize(f) : "";
+    await addDoc(collection(db, "posts"), { title, content, image, uid: user.uid, name: user.displayName || "익명", createdAt: serverTimestamp(), hidden: false });
+    $("title").value = ""; $("content").value = ""; $("file").value = "";
+  } catch (e) { alert("등록 실패: " + e.message); }
+  $("submit").disabled = false;
+};
+
+function render() {
+  const list = posts.filter(p => !p.hidden && (!onePost || p.id === onePost));
+  $("feed").innerHTML = (onePost ? `<p><a href="./">← 전체 글 보기</a></p>` : "") + (list.map(p => {
+    const cs = comments.filter(c => c.postId === p.id);
+    const t = p.createdAt?.toDate ? p.createdAt.toDate().toLocaleString("ko-KR") : "";
+    return `<article class="card post" data-id="${p.id}">
+      <div class="meta">${esc(p.name)} · ${t}</div>
+      <h3>${esc(p.title)}</h3>
+      <div class="body">${linkify(p.content)}</div>
+      ${p.image ? `<img src="${p.image}" alt="첨부 사진">` : ""}
+      <div style="margin:8px 0">
+        <button class="ghost" data-a="share">공유</button>
+        <button class="ghost danger" data-a="report-post">신고</button>
+        ${user && user.uid === p.uid ? `<button class="ghost danger" data-a="del-post">삭제</button>` : ""}
+      </div>
+      ${cs.map(c => `<div class="cm" data-cid="${c.id}"><span class="meta">${esc(c.name)}</span> <span class="body">${linkify(c.text)}</span>
+        <button class="ghost danger" data-a="report-cm">신고</button>${user && user.uid === c.uid ? `<button class="ghost danger" data-a="del-cm">삭제</button>` : ""}</div>`).join("")}
+      ${user && !banned ? `<div class="row" style="margin-top:8px"><input maxlength="500" placeholder="댓글 (링크 가능)"><button data-a="comment">등록</button></div>` : ""}
+    </article>`;
+  }).join("") || `<p class="meta">아직 게시물이 없습니다.</p>`);
+}
+
+$("feed").addEventListener("click", async e => {
+  const a = e.target.dataset.a; if (!a) return;
+  const art = e.target.closest("article"), pid = art.dataset.id, p = posts.find(x => x.id === pid);
+  if (a === "share") {
+    const url = location.origin + location.pathname + "?post=" + pid;
+    if (navigator.share) navigator.share({ title: p.title, url }).catch(() => {});
+    else { await navigator.clipboard.writeText(url); alert("링크가 복사되었습니다."); }
+  }
+  if (a === "del-post" && confirm("삭제할까요?")) await deleteDoc(doc(db, "posts", pid));
+  if (a === "del-cm" && confirm("삭제할까요?")) await deleteDoc(doc(db, "comments", e.target.closest(".cm").dataset.cid));
+  if (a === "comment") {
+    const inp = art.querySelector("input"), text = inp.value.trim();
+    if (!text) return;
+    if (hasBad(text)) return alert("부적절한 단어가 포함되어 있습니다.");
+    if (!cooldown()) return;
+    try { await addDoc(collection(db, "comments"), { postId: pid, text, uid: user.uid, name: user.displayName || "익명", createdAt: serverTimestamp() }); inp.value = ""; }
+    catch (err) { alert("등록 실패: " + err.message); }
+  }
+  if (a === "report-post" || a === "report-cm") {
+    if (!user) return alert("로그인 후 신고할 수 있습니다.");
+    const isCm = a === "report-cm";
+    const target = isCm ? comments.find(c => c.id === e.target.closest(".cm").dataset.cid) : p;
+    const reasons = { 1: "욕설/비방", 2: "음란/불쾌", 3: "광고/스팸", 4: "기타" };
+    const r = prompt("신고 사유 번호를 입력하세요\n1 욕설/비방  2 음란/불쾌  3 광고/스팸  4 기타", "1");
+    if (!reasons[r]) return;
+    try {
+      await setDoc(doc(db, "reports", user.uid + "_" + target.id), {
+        type: isCm ? "comment" : "post", targetId: target.id, postId: pid, targetUid: target.uid, targetName: target.name,
+        preview: (isCm ? target.text : target.title + " - " + target.content).slice(0, 200),
+        reason: reasons[r], reporterUid: user.uid, createdAt: serverTimestamp()
+      });
+      alert("신고가 접수되었습니다.");
+    } catch { alert("이미 신고했거나 신고할 수 없습니다."); }
+  }
+});
+</script>
+</body>
+</html>
