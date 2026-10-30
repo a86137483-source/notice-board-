@@ -31,8 +31,10 @@ a{color:var(--pri)}
 </style>
 </head>
 <body>
-<header><h1><a href="./" style="color:inherit;text-decoration:none">자유게시판</a></h1><div id="auth"></div></header>
+<header><h1><a href="./" style="color:inherit;text-decoration:none">자유게시판</a></h1><div id="auth"><button id="in">구글 로그인</button></div></header>
 <main>
+  <div id="err" class="notice" hidden></div>
+  <button id="writeBtn" style="width:100%;margin-bottom:12px;padding:12px;font-size:16px">✏️ 글쓰기</button>
   <div id="banBox" class="notice" hidden>이용이 제한된 계정입니다. 글/댓글 작성이 불가능합니다.</div>
   <section id="compose" class="card" hidden>
     <input id="title" maxlength="100" placeholder="제목">
@@ -43,6 +45,11 @@ a{color:var(--pri)}
   <div id="feed"></div>
 </main>
 
+<script>
+function showErr(m){var e=document.getElementById("err");e.hidden=false;e.textContent=m;}
+if(location.protocol==="file:")showErr("파일을 더블클릭해서 열면 동작하지 않습니다. Live Server나 호스팅 주소(http://...)로 접속하세요.");
+window.addEventListener("error",function(e){showErr("오류: "+(e.message||"스크립트를 불러오지 못했습니다. F12 콘솔을 확인하세요."));});
+</script>
 <script type="module">
 import { auth, db, provider } from "./firebase.js";
 import { signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
@@ -66,13 +73,19 @@ onAuthStateChanged(auth, async u => {
   $("auth").innerHTML = u ? `<span class="meta">${esc(u.displayName || "익명")}</span> <button class="ghost" id="out">로그아웃</button>` : `<button id="in">구글 로그인</button>`;
   if ($("in")) $("in").onclick = () => signInWithPopup(auth, provider);
   if ($("out")) $("out").onclick = () => signOut(auth);
-  $("compose").hidden = !u || banned;
+  if (!u || banned) $("compose").hidden = true;
   $("banBox").hidden = !banned;
   render();
 });
 
 onSnapshot(query(collection(db, "posts"), orderBy("createdAt", "desc"), limit(50)), s => { posts = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); });
 onSnapshot(query(collection(db, "comments"), orderBy("createdAt", "asc"), limit(500)), s => { comments = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); });
+
+$("writeBtn").onclick = () => {
+  if (!user) return signInWithPopup(auth, provider).catch(e => alert("로그인 실패: " + e.message));
+  if (banned) return alert("이용이 제한된 계정입니다.");
+  $("compose").hidden = !$("compose").hidden;
+};
 
 function cooldown() {
   if (Date.now() - lastAction < 8000) { alert("잠시 후 다시 시도해주세요."); return false; }
